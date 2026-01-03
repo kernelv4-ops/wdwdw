@@ -1,0 +1,113 @@
+version: 2.1
+
+jobs:
+  build-clang:
+    docker:
+      - image: cimg/base:current # Image dasar CircleCI yang stabil
+    resource_class: large # Menggunakan 4 vCPU & 8GB RAM agar linking tidak crash
+    steps:
+      - checkout
+
+      - run:
+          name: Install Dependencies
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y cmake ninja-build wget unzip tar xz-utils file python3 build-essential
+
+      - restore_cache:
+          keys:
+            - llvm-source-v17
+
+      - run:
+          name: Download NDK and LLVM Source
+          command: |
+            # Download NDK
+            if [ ! -d "android-ndk-r26" ]; then
+              wget -q https://dl.google.com/android/repository/android-ndk-r26-linux.zip
+              unzip -q android-ndk-r26-linux.zip
+              rm android-ndk-r26-linux.zip
+            fi
+
+            # Download LLVM
+            if [ ! -d "llvm-project-17.0.6.src" ]; then
+              wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/llvm-project-17.0.6.src.tar.xz
+              tar -xf llvm-project-17.0.6.src.tar.xz
+              rm llvm-project-17.0.6.src.tar.xz
+            fi
+
+      - save_cache:
+          key: llvm-source-v17
+          paths:
+            - llvm-project-17.0.6.src
+            - android-ndk-r26
+
+      - run:
+          name: Build Host TableGen
+          command: |
+            mkdir -p build-host
+            cd build-host
+            cmake ../llvm-project-17.0.6.src/llvm -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DLLVM_ENABLE_PROJECTS=clang \
+              -DLLVM_TARGETS_TO_BUILD=AArch64 \
+              -DLLVM_INCLUDE_TESTS=OFF
+            ninja llvm-tblgen clang-tblgen
+
+      - run:
+          name: Build Clang for Android
+          no_output_timeout: 60m # Jangan stop jika tidak ada log selama 1 jam
+          command: |
+            export ANDROID_NDK=$(pwd)/android-ndk-r26
+            export TARGET=aarch64-linux-android29
+            export ANDROID_TOOLCHAIN=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64
+            
+            mkdir -p build-android
+            cd build-android
+            cmake ../llvm-project-17.0.6.src/llvm -G Ninja \
+              -DCMAKE_BUILD_TYPE=MinSizeRel \
+              -DLLVM_ENABLE_PROJECTS='clang;lld' \
+              -DLLVM_TARGETS_TO_BUILD='AArch64' \
+              -DCMAKE_SYSTEM_NAME=Android \
+              -DCMAKE_SYSTEM_VERSION=29 \
+              -DCMAKE_ANDROID_ARCH_ABI=arm64-v8a \
+              -DCMAKE_ANDROID_NDK=$ANDROID_NDK \
+              -DLLVM_TABLEGEN=$(pwd)/../build-host/bin/llvm-tblgen \
+              -DCLANG_TABLEGEN=$(pwd)/../build-host/bin/clang-tblgen \
+              -DLLVM_INCLUDE_TESTS=OFF \
+              -DCMAKE_INSTALL_PREFIX=$(pwd)/../clang-install
+            
+            # -j4 menyesuaikan dengan resource_class: large
+            ninja -j6
+            ninja install
+
+      - run:
+          name: Package Artifacts
+          command: |
+            export ANDROID_NDK=$(pwd)/android-ndk-r26
+            export ANDROID_TOOLCHAIN=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64
+            
+            mkdir -p clang-rom/system/bin
+            mkdir -p clang-rom/system/lib64
+            
+            cp -r clang-install/bin/* clang-rom/system/bin/
+            cp $ANDROID_TOOLCHAIN/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so clang-rom/system/lib64/
+            
+            # Membuat symlink standar compiler
+            cd clang-rom/system/bin
+            ln -sf clang clang-17
+            ln -sf clang clang++
+            ln -sf clang cc
+            ln -sf clang++ c++
+            cd ../../../
+            
+            tar -czvf clang-android-circleci.tar.gz -C clang-rom system/
+
+      - store_artifacts:
+          path: clang-android-circleci.tar.gz
+          destination: build-output
+
+workflows:
+  version: 2
+  build:
+    jobs:
+      - build-clang
