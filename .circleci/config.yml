@@ -77,7 +77,7 @@ jobs:
               -DCMAKE_INSTALL_PREFIX=$(pwd)/../clang-install
             
             # -j4 menyesuaikan dengan resource_class: large
-            ninja -j6
+            ninja -j4
             ninja install
 
       - run:
